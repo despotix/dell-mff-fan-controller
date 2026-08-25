@@ -1,0 +1,18 @@
+[Unit]
+Description=Beep at boot if optiplex-fan did not start
+# Ordered after the fan daemon, but deliberately not Requires=/BindsTo=/Wants=:
+# this unit exists to report that one being absent, so it has to run when it is
+# disabled, failed or gone. A bare After= only orders the two when both are
+# being started anyway, which is exactly the relationship wanted here.
+After=optiplex-fan.service
+
+[Service]
+# simple, not oneshot: the script sleeps ALARM_DELAY before deciding, and a
+# oneshot would hold multi-user.target open for that whole time. Nothing is
+# ordered after this unit, so there is nothing to hold up.
+Type=simple
+ExecStart=/usr/local/sbin/optiplex-fan-alarm.sh
+# No Restart=: it says its piece once per boot and stays quiet.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Two-zone fan control for Dell OptiPlex (quiet idle, BIOS curve under load)
+After=basic.target
+
+[Service]
+Type=notify
+# systemd-notify runs as a child of the script, not as the main PID, so
+# NotifyAccess=main would make systemd discard both --ready and WATCHDOG=1.
+NotifyAccess=all
+WatchdogSec=30
+ExecStart=/usr/local/sbin/optiplex-fan-control.sh
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=10
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target
