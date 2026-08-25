@@ -77,7 +77,8 @@ PANIC_TIMEOUT seconds to get the package back down to PANIC_RECOVER:
   reached it   the alarm was enough, work carries on as normal
   did not      one long beep, and the machine is powered off
 A machine that shuts down this way comes back with fan control OFF: the
-service still starts, but it only beeps to say it is latched, until you
+service still starts and beeps to say it is latched, but it keeps watching
+the temperature — past LATCH_T_PANIC it purges and powers off — until you
 remove /var/lib/optiplex-fan/panic."
 MI_PANIC_AGAINST="Against it: --force skips the normal unmount, and the threshold has to
 sit above what real workloads reach — 91C was measured here under full
@@ -162,6 +163,9 @@ T_PANIC=0
 PANIC_RECOVER=80
 PANIC_TIMEOUT=120
 PANIC_ACTION=poweroff
+LATCH_T_PANIC=90
+LATCH_PANIC_RECOVER=80
+LATCH_PANIC_TIMEOUT=60
 ALARM=1
 ALARM_DELAY=30
 ALARM_REPEATS=3
@@ -182,6 +186,9 @@ T_PANIC=${T_PANIC:-0}
 PANIC_RECOVER=${PANIC_RECOVER:-${PANIC_COOL_TO:-80}}
 PANIC_TIMEOUT=${PANIC_TIMEOUT:-${PANIC_COOL_TIMEOUT:-120}}
 PANIC_ACTION=${PANIC_ACTION:-poweroff}
+LATCH_T_PANIC=${LATCH_T_PANIC:-90}
+LATCH_PANIC_RECOVER=${LATCH_PANIC_RECOVER:-80}
+LATCH_PANIC_TIMEOUT=${LATCH_PANIC_TIMEOUT:-60}
 ALARM=${ALARM:-1}
 ALARM_DELAY=${ALARM_DELAY:-30}
 ALARM_REPEATS=${ALARM_REPEATS:-3}
@@ -527,9 +534,25 @@ cat > "$CONF_FILE" <<EOF
 #                machine that has to come back on its own.
 #                Either way the daemon latches first, by writing
 #                /var/lib/optiplex-fan/panic. On the next boot the service
-#                still starts — it just controls nothing and beeps to say so,
-#                which is why the latch is a file and not a disabled unit.
-#                Remove that file to hand control back.
+#                still starts — it controls nothing and beeps to say so, which
+#                is why the latch is a file and not a disabled unit — but it
+#                keeps reading the temperature. Remove that file to hand
+#                control back.
+# LATCH_T_PANIC:       the one duty that survives the latch: the temperature
+#                watch. A box that shut down for overheating and came back on
+#                the stock curve has less cooling help than ever, so it must
+#                not sit unwatched. At this temperature the daemon purges the
+#                fan and powers the machine off if it does not recover in
+#                time. Never a reboot, whatever PANIC_ACTION says: this
+#                machine already proved its workload cannot be cooled, and a
+#                reboot would walk it straight back into that workload with
+#                every zone gone. 0 disables the watch.
+# LATCH_PANIC_RECOVER: the temperature (C) it has to get back down to.
+#                Reaching it hands the fan back to the BIOS and the watch
+#                resumes.
+# LATCH_PANIC_TIMEOUT: seconds allowed to get there. Shorter than
+#                PANIC_TIMEOUT by default — latched, there is no purge zone
+#                that already had the fan flat out before the watch tripped.
 # ALARM:         beep the internal speaker. At boot, if optiplex-fan.service is
 #                not running; and on demand for the daemon, which is how the
 #                panic beeps get made. Everything here fails safe into the BIOS
@@ -579,6 +602,9 @@ T_PANIC=$T_PANIC
 PANIC_RECOVER=$PANIC_RECOVER
 PANIC_TIMEOUT=$PANIC_TIMEOUT
 PANIC_ACTION=$PANIC_ACTION
+LATCH_T_PANIC=$LATCH_T_PANIC
+LATCH_PANIC_RECOVER=$LATCH_PANIC_RECOVER
+LATCH_PANIC_TIMEOUT=$LATCH_PANIC_TIMEOUT
 ALARM=$ALARM
 ALARM_DELAY=$ALARM_DELAY
 ALARM_REPEATS=$ALARM_REPEATS

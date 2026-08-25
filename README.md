@@ -1,4 +1,4 @@
-# optiplex-fan-control
+# dell-mff-fan-controller
 
 Three-zone fan control for Dell OptiPlex Micro machines on Linux. It gives you
 a quiet idle instead of the needlessly loud stock curve, and forces the fan to
@@ -20,7 +20,8 @@ English · [українською](README.ua.md)
 - **Overheat protection with an audible alarm.** At 95°C the box beeps and goes
   to full purge; if it cannot get back under 80°C within two minutes, one long
   beep and it powers itself off. It comes back with fan control latched off,
-  beeping to say so — a silent failure never stays silent.
+  beeping to say so — but still watching: 90°C in that state means full purge
+  and power-off, never a reboot. A silent failure never stays silent.
 
 ## Install
 
@@ -199,6 +200,9 @@ journal output is for grepping.
 | `PANIC_RECOVER` | 80 | °C it has to get back down to |
 | `PANIC_TIMEOUT` | 120 | seconds allowed to get there |
 | `PANIC_ACTION` | poweroff | what to do if it does not: `poweroff` or `reboot` |
+| `LATCH_T_PANIC` | 90 | °C that trips the brake while latched (fan control off, BIOS curve); `0` disables the watch |
+| `LATCH_PANIC_RECOVER` | 80 | °C it has to get back down to in the latched state |
+| `LATCH_PANIC_TIMEOUT` | 60 | seconds allowed before the latched state powers the machine off |
 | `ALARM` | 1 | the audible alarm, boot check included; `0` disables all of it |
 | `ALARM_DELAY` | 30 | seconds into the boot before the check |
 | `ALARM_REPEATS` | 3 | how many times the whole signal is played |
@@ -292,6 +296,16 @@ have dealt with the cause:
 sudo rm /var/lib/optiplex-fan/panic
 sudo systemctl restart optiplex-fan
 ```
+
+**Latched does not mean unwatched.** The daemon keeps reading the package
+temperature, and if it reaches `LATCH_T_PANIC` (90°C) — on the stock curve,
+with every zone gone, exactly when the box has the least cooling help — it
+purges the fan and gives it `LATCH_PANIC_TIMEOUT` (60 s) to get back under
+`LATCH_PANIC_RECOVER` (80°C). If it does, the fan is handed back to the BIOS
+and the watch resumes. If it does not, the machine is powered off — always,
+whatever `PANIC_ACTION` says: this box already proved its workload cannot be
+cooled, and a reboot would walk it straight back into that workload with even
+the daemon's zones gone. `LATCH_T_PANIC=0` turns the watch off.
 
 Pick the threshold from measurements, not intuition. On this machine a full load
 reaches 91°C, so a brake at 85 would have fired 136 seconds into any serious

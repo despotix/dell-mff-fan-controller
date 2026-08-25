@@ -39,7 +39,10 @@
 #
 # Failure modes all end in BIOS auto: the EXIT/TERM/INT/ABRT trap restores it
 # and an unreadable temperature restores it, so a dead daemon never leaves the
-# fan pinned. Above that sits the panic brake — see panic_sequence().
+# fan pinned. Above that sits the panic brake — see panic_sequence(). And once
+# the brake has latched, the daemon controls nothing but keeps watching the
+# temperature: past LATCH_T_PANIC it purges and powers off — see the startup
+# check.
 set -u
 
 # CONF, PANIC_FLAG and HWMON_ROOT are overridable so the whole curve can be
@@ -61,6 +64,13 @@ T_PANIC=${T_PANIC:-0}
 PANIC_RECOVER=${PANIC_RECOVER:-${PANIC_COOL_TO:-80}}
 PANIC_TIMEOUT=${PANIC_TIMEOUT:-${PANIC_COOL_TIMEOUT:-120}}
 PANIC_ACTION=${PANIC_ACTION:-poweroff}
+# The latched state keeps exactly one duty. The zones are off and the fan is on
+# the stock curve, but the box got here by overheating — it must not sit on top
+# of that unwatched. Past LATCH_T_PANIC the daemon purges and powers off, never
+# reboots; see the startup check. 0 disables the watch.
+LATCH_T_PANIC=${LATCH_T_PANIC:-90}
+LATCH_PANIC_RECOVER=${LATCH_PANIC_RECOVER:-80}
+LATCH_PANIC_TIMEOUT=${LATCH_PANIC_TIMEOUT:-60}
 
 PANIC_FLAG=${PANIC_FLAG:-/var/lib/optiplex-fan/panic}
 ALARM_SH=${ALARM_SH:-/usr/local/sbin/optiplex-fan-alarm.sh}
@@ -88,6 +98,11 @@ HWMON_ROOT=${HWMON_ROOT:-/sys/class/hwmon}
 # began and every trip would end in a shutdown.
 (( T_PANIC > 0 && PANIC_RECOVER >= T_PANIC )) && PANIC_RECOVER=$(( T_PANIC - 5 ))
 (( PANIC_TIMEOUT < INTERVAL )) && PANIC_TIMEOUT=$INTERVAL
+# The same two rules for the latched watch. The zone thresholds do not apply
+# there — latched, no zone ever runs — so only trigger-vs-recover and the
+# deadline have to make sense.
+(( LATCH_T_PANIC > 0 && LATCH_PANIC_RECOVER >= LATCH_T_PANIC )) && LATCH_PANIC_RECOVER=$(( LATCH_T_PANIC - 5 ))
+(( LATCH_PANIC_TIMEOUT < INTERVAL )) && LATCH_PANIC_TIMEOUT=$INTERVAL
 [ "$PANIC_ACTION" = reboot ] || PANIC_ACTION=poweroff
 T_RESUME=$(( T_QUIET - T_HYST ))
 
@@ -252,8 +267,9 @@ apply_zone() {
 # is there for a machine that has to come back.
 #
 # The latch is a file, not `systemctl disable`. The unit stays enabled and still
-# starts at the next boot — it just reads the flag and controls nothing, which
-# is what makes it able to beep about its own state. See the startup check.
+# starts at the next boot — it reads the flag, controls nothing but keeps the
+# temperature watch, which is what makes it able to beep about its own state and
+# to save the box if it cooks again. See the startup check.
 beep() {
     [ -x "$ALARM_SH" ] || return 0
     if [ "${2:-}" = once ]; then
@@ -267,10 +283,10 @@ beep() {
 }
 
 panic_latch_and_stop() {
-    local why="$1"
-    echo "PANIC: $why — ${PANIC_ACTION}" >&2
-    logger -p daemon.crit -t optiplex-fan "$why — ${PANIC_ACTION}" 2>/dev/null
-    command -v wall >/dev/null 2>&1 && wall "optiplex-fan: $why — ${PANIC_ACTION}" 2>/dev/null
+    local why="$1" action="${2:-$PANIC_ACTION}"
+    echo "PANIC: $why — ${action}" >&2
+    logger -p daemon.crit -t optiplex-fan "$why — ${action}" 2>/dev/null
+    command -v wall >/dev/null 2>&1 && wall "optiplex-fan: $why — ${action}" 2>/dev/null
 
     # Latch first, so a machine that dies anywhere below still comes back with
     # the fan on the stock curve and beeping about it.
@@ -286,7 +302,7 @@ panic_latch_and_stop() {
     beep long once
 
     sync
-    systemctl "$PANIC_ACTION" --force
+    systemctl "$action" --force
 
     # Do not exit: Restart=always would drag this daemon back mid-shutdown.
     # Keep feeding the watchdog until the machine actually goes down.
@@ -295,38 +311,50 @@ panic_latch_and_stop() {
 
 # Returns 0 if the machine came back down on its own and normal operation
 # resumes. Otherwise it never returns — panic_latch_and_stop takes over.
+#   $1 temperature that tripped it, $2 the threshold, $3 the temperature to get
+#   back down to, $4 the seconds allowed for that, $5 the action if it fails
+#   (defaults to PANIC_ACTION). The latched watch calls it with poweroff.
 panic_sequence() {
-    local t="$1" waited=0 tnow
-    local msg="CPU ${t}C >= ${T_PANIC}C"
+    local t="$1" trigger="$2" recover="$3" timeout="$4" action="${5:-$PANIC_ACTION}"
+    local waited=0 tnow
+    local msg="CPU ${t}C >= ${trigger}C"
 
-    echo "PANIC: $msg — purge, ${PANIC_TIMEOUT}s to get back to ${PANIC_RECOVER}C" >&2
-    logger -p daemon.crit -t optiplex-fan "$msg — purge, ${PANIC_TIMEOUT}s to reach ${PANIC_RECOVER}C" 2>/dev/null
+    echo "PANIC: $msg — purge, ${timeout}s to get back to ${recover}C" >&2
+    logger -p daemon.crit -t optiplex-fan "$msg — purge, ${timeout}s to reach ${recover}C" 2>/dev/null
     beep short
 
     set_manual 255
     mode=purge
-    while (( waited < PANIC_TIMEOUT )); do
+    while (( waited < timeout )); do
         echo 255 > "$PWM" 2>/dev/null
         if tnow=$(cat "$TEMP_INPUT" 2>/dev/null) && [ -n "$tnow" ]; then
             tnow=$(( tnow / 1000 ))
-            if (( tnow <= PANIC_RECOVER )); then
+            if (( tnow <= recover )); then
                 echo "PANIC: recovered — ${tnow}C after ${waited}s, carrying on"
                 logger -p daemon.notice -t optiplex-fan "recovered to ${tnow}C after ${waited}s of purge" 2>/dev/null
                 return 0
             fi
-            echo "PANIC: purging ${tnow}C -> ${PANIC_RECOVER}C (${waited}/${PANIC_TIMEOUT}s)"
+            echo "PANIC: purging ${tnow}C -> ${recover}C (${waited}/${timeout}s)"
         fi
         ping_watchdog
         nap "$INTERVAL"
         waited=$(( waited + INTERVAL ))
     done
 
-    panic_latch_and_stop "still above ${PANIC_RECOVER}C after ${PANIC_TIMEOUT}s of purge"
+    panic_latch_and_stop "still above ${recover}C after ${timeout}s of purge" "$action"
 }
 
 # Latched by an earlier trip: stay running, but control nothing. The unit is
 # still enabled precisely so this runs and says so — the fan is on the stock
 # BIOS curve until somebody clears the flag.
+#
+# The watch is the one duty that survives the latch. A box that shut down for
+# overheating once and came back on the stock curve has less cooling help than
+# ever, so the temperature keeps being read; past LATCH_T_PANIC the daemon
+# purges and powers off. Rebooting is not offered here, not even through
+# PANIC_ACTION=reboot: this machine already proved its workload cannot be
+# cooled, and a reboot would walk it straight back into that workload with
+# every zone gone.
 if [ -e "$PANIC_FLAG" ]; then
     echo "Panic brake latched — $PANIC_FLAG exists. Fan control is OFF (BIOS auto)."
     echo "Last entry: $(tail -1 "$PANIC_FLAG" 2>/dev/null)"
@@ -335,8 +363,25 @@ if [ -e "$PANIC_FLAG" ]; then
     command -v systemd-notify >/dev/null 2>&1 && systemd-notify --ready
     restore_bios
     beep long
-    # Nothing to do but stay alive and keep saying so if anyone asks.
-    while true; do ping_watchdog; nap "$INTERVAL"; done
+    if (( LATCH_T_PANIC > 0 )); then
+        echo "  Temperature watch stays on: purge at ${LATCH_T_PANIC}C, ${LATCH_PANIC_TIMEOUT}s to get"
+        echo "  back under ${LATCH_PANIC_RECOVER}C — then poweroff, never reboot"
+    else
+        echo "  Temperature watch: disabled (LATCH_T_PANIC=0)"
+    fi
+    while true; do
+        ping_watchdog
+        if temp_raw=$(cat "$TEMP_INPUT" 2>/dev/null) && [ -n "$temp_raw" ]; then
+            t=$(( temp_raw / 1000 ))
+            if (( LATCH_T_PANIC > 0 && t >= LATCH_T_PANIC )); then
+                panic_sequence "$t" "$LATCH_T_PANIC" "$LATCH_PANIC_RECOVER" "$LATCH_PANIC_TIMEOUT" poweroff
+                # Recovered: hand the fan straight back. A latched daemon
+                # controls nothing — not even after saving the package itself.
+                go_auto
+            fi
+        fi
+        nap "$INTERVAL"
+    done
 fi
 
 echo "Four-zone fan control active."
@@ -374,7 +419,7 @@ while true; do
     apply_zone "$t"
     echo "temp=${t}C mode=${mode:-untouched} rpm=$(cat "$DELL_DIR/fan1_input" 2>/dev/null)"
 
-    (( T_PANIC > 0 && t >= T_PANIC )) && panic_sequence "$t"
+    (( T_PANIC > 0 && t >= T_PANIC )) && panic_sequence "$t" "$T_PANIC" "$PANIC_RECOVER" "$PANIC_TIMEOUT"
 
     ping_watchdog
     nap "$INTERVAL"
