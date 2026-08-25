@@ -21,6 +21,13 @@ above that it steps rather than ramps. Two things are wrong with that:
   91°C while the fan was still turning 1783 of an available ~4800 RPM. Ten
   degrees of headroom, given away for nothing.
 
+The exact idle RPM depends on your build (drives, RAM, case airflow all shift
+the EC's baseline). On my own unit the stock curve idles at **2000+ RPM on a
+cold CPU** — noticeably above the ~1800 RPM baseline above, and audible in a
+quiet room. That gap between "cold CPU" and "loud fan" is the whole reason
+the quiet level (~1130 RPM) exists: the BIOS never uses it, but the EC
+supports it.
+
 ## What the hardware can actually do
 
 Measured with `fan-diag.sh`, which installs nothing and always restores BIOS
