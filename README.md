@@ -10,6 +10,49 @@ English · [українською](README.ua.md)
 > kernel 7.0). Other OptiPlex models exposed through `dell_smm_hwmon` should
 > work, but verify the thresholds on your own machine — see `thermal-test.sh`.
 
+**Key features**
+
+- **Quiet idle.** The EC has a ~1130 RPM level the BIOS never uses. On my own
+  unit the stock curve holds **2000+ RPM on a cold CPU** — audible in a quiet
+  room; this daemon actually uses the quiet level instead.
+- **Aggressive ramp under load**, forcing full speed where the stock curve
+  steps too late and lets the package run hotter than it needs to.
+- **Overheat protection with an audible alarm.** An optional emergency brake
+  reboots the machine if cooling ever loses the race, and a separate alarm
+  daemon beeps the internal speaker at boot if the fan controller itself isn't
+  running — so a silent failure doesn't stay silent.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/despotix/dell-mff-fan-controller/main/get.sh | sudo bash
+```
+
+The installer asks about each threshold, showing current values as defaults, so
+re-running it is also how you reconfigure. It needs no git on the target
+machine — it fetches a tarball with curl.
+
+Non-interactive, taking defaults (or keeping an existing config):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/despotix/dell-mff-fan-controller/main/get.sh | sudo bash -s -- -y
+```
+
+From a clone:
+
+```bash
+sudo ./install.sh        # interactive
+sudo ./install.sh -y     # defaults / keep existing config
+sudo ./uninstall.sh      # remove; BIOS auto is restored when the service stops
+```
+
+Check it afterwards:
+
+```bash
+systemctl status optiplex-fan
+journalctl -u optiplex-fan -f
+```
+
 ## The problem
 
 The stock BIOS holds the fan at ~1800 RPM even on a cold CPU (35-40°C), and
@@ -116,37 +159,6 @@ Every failure path ends in BIOS auto: an `EXIT/TERM/INT/ABRT` trap restores it,
 an unreadable temperature restores it, and if the loop wedges while the fan is
 on a manual level, `WatchdogSec=30` restarts the service and the trap fires on
 the way out.
-
-## Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/despotix/dell-mff-fan-controller/main/get.sh | sudo bash
-```
-
-The installer asks about each threshold, showing current values as defaults, so
-re-running it is also how you reconfigure. It needs no git on the target
-machine — it fetches a tarball with curl.
-
-Non-interactive, taking defaults (or keeping an existing config):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/despotix/dell-mff-fan-controller/main/get.sh | sudo bash -s -- -y
-```
-
-From a clone:
-
-```bash
-sudo ./install.sh        # interactive
-sudo ./install.sh -y     # defaults / keep existing config
-sudo ./uninstall.sh      # remove; BIOS auto is restored when the service stops
-```
-
-Check it afterwards:
-
-```bash
-systemctl status optiplex-fan
-journalctl -u optiplex-fan -f
-```
 
 ## Language
 
