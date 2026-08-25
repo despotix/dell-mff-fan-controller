@@ -39,7 +39,7 @@
 #
 # Failure modes all end in BIOS auto: the EXIT/TERM/INT/ABRT trap restores it
 # and an unreadable temperature restores it, so a dead daemon never leaves the
-# fan pinned. Above that sits the panic brake — see emergency_reboot().
+# fan pinned. Above that sits the panic brake — see panic_sequence().
 set -u
 
 # CONF, PANIC_FLAG and HWMON_ROOT are overridable so the whole curve can be
@@ -56,14 +56,14 @@ T_HOT_HYST=${T_HOT_HYST:-5}
 QUIET_PWM=${QUIET_PWM:-0}
 INTERVAL=${INTERVAL:-2}
 T_PANIC=${T_PANIC:-0}
-PANIC_SAMPLES=${PANIC_SAMPLES:-5}
-PANIC_COOL_TO=${PANIC_COOL_TO:-75}
-PANIC_COOL_TIMEOUT=${PANIC_COOL_TIMEOUT:-180}
-PANIC_WATCH_SEC=${PANIC_WATCH_SEC:-60}
-PANIC_WATCH_TRIP=${PANIC_WATCH_TRIP:-80}
-PANIC_REPRIEVES=${PANIC_REPRIEVES:-2}
+# PANIC_COOL_TO / PANIC_COOL_TIMEOUT were the old names, from the version that
+# cooled down and then watched to decide whether to reboot.
+PANIC_RECOVER=${PANIC_RECOVER:-${PANIC_COOL_TO:-80}}
+PANIC_TIMEOUT=${PANIC_TIMEOUT:-${PANIC_COOL_TIMEOUT:-120}}
+PANIC_ACTION=${PANIC_ACTION:-poweroff}
 
 PANIC_FLAG=${PANIC_FLAG:-/var/lib/optiplex-fan/panic}
+ALARM_SH=${ALARM_SH:-/usr/local/sbin/optiplex-fan-alarm.sh}
 HWMON_ROOT=${HWMON_ROOT:-/sys/class/hwmon}
 
 # The watchdog is what saves us if this loop wedges while the fan is pinned to
@@ -84,13 +84,11 @@ HWMON_ROOT=${HWMON_ROOT:-/sys/class/hwmon}
 (( T_PURGE > 0 && T_BOOST == 0 && T_PURGE <= T_QUIET )) && T_PURGE=$(( T_QUIET + 1 ))
 (( T_PANIC > 0 && T_PANIC <= T_QUIET )) && T_PANIC=$(( T_QUIET + 1 ))
 (( T_PANIC > 0 && T_PURGE > 0 && T_PANIC <= T_PURGE )) && T_PANIC=$(( T_PURGE + 1 ))
-# Cooling has to end below the trigger, or the wait would never finish.
-(( T_PANIC > 0 && PANIC_COOL_TO >= T_PANIC )) && PANIC_COOL_TO=$(( T_PANIC - 5 ))
-(( PANIC_COOL_TIMEOUT < INTERVAL )) && PANIC_COOL_TIMEOUT=$INTERVAL
-# The watch has to trip above the temperature we cooled to, or the reprieve
-# would be over before it began.
-(( PANIC_WATCH_TRIP <= PANIC_COOL_TO )) && PANIC_WATCH_TRIP=$(( PANIC_COOL_TO + 1 ))
-(( PANIC_WATCH_SEC < INTERVAL )) && PANIC_WATCH_SEC=$INTERVAL
+# Recovery has to be below the trigger, or the wait would be over before it
+# began and every trip would end in a shutdown.
+(( T_PANIC > 0 && PANIC_RECOVER >= T_PANIC )) && PANIC_RECOVER=$(( T_PANIC - 5 ))
+(( PANIC_TIMEOUT < INTERVAL )) && PANIC_TIMEOUT=$INTERVAL
+[ "$PANIC_ACTION" = reboot ] || PANIC_ACTION=poweroff
 T_RESUME=$(( T_QUIET - T_HYST ))
 
 find_hwmon() {
@@ -125,7 +123,6 @@ PWM_ENABLE="$DELL_DIR/pwm1_enable"
 mode=""
 manual=0
 mode_rb=""      # what pwm1 reads back in the current manual mode
-panic_hits=0
 
 ping_watchdog() { command -v systemd-notify >/dev/null 2>&1 && systemd-notify WATCHDOG=1; }
 
@@ -217,8 +214,6 @@ pick_zone() {
 }
 
 # Put the fan where the given temperature says it belongs, and hold it there.
-# Used by the main loop and by the panic brake's observation window, so both
-# drive the fan through exactly the same code.
 apply_zone() {
     local t="$1"
     case "$(pick_zone "$t")" in
@@ -245,125 +240,104 @@ apply_zone() {
     esac
 }
 
-# Panic brake, off by default (T_PANIC=0): T_PANIC sustained for PANIC_SAMPLES
-# readings means the fan is already flat out and losing, which is beyond this
-# daemon's remit.
+# Panic brake, off by default (T_PANIC=0). One rule: reaching T_PANIC means the
+# fan is already flat out and losing, so sound the alarm, hold purge, and give
+# the machine PANIC_TIMEOUT seconds to get back down to PANIC_RECOVER. If it
+# does, carry on. If it does not, the cooling has lost — long beep, and shut the
+# box down.
 #
-# It does not reboot on the spot. The sequence is:
+# Powering off beats rebooting: a package that could not be cooled while running
+# will not be cooled any better by coming straight back up into the same
+# workload, and nothing controls the fan through POST at all. PANIC_ACTION=reboot
+# is there for a machine that has to come back.
 #
-#   1. latch — disable the unit, so a crash anywhere below still boots stock
-#   2. cool  — hold purge until the package reaches PANIC_COOL_TO
-#   3. watch — hand the fan back to normal zone control and see what happens
-#   4. either reboot, or grant a reprieve and carry on
-#
-# Step 2 exists because nothing controls the fan through POST: rebooting a hot
-# package would coast it through the restart with no airflow at exactly the
-# wrong moment. Step 3 exists because a machine that cooled down and stays cool
-# has recovered, and rebooting it would be pure damage. Only a package that
-# climbs straight back to PANIC_WATCH_TRIP has actually failed to recover.
-#
-# PANIC_REPRIEVES bounds the mercy: without it, a permanently overloaded box
-# would cycle heat -> cool -> reprieve -> heat forever and the brake would never
-# do its job. After that many reprieves the next trip reboots without a watch.
-panic_reprieves_used=0
+# The latch is a file, not `systemctl disable`. The unit stays enabled and still
+# starts at the next boot — it just reads the flag and controls nothing, which
+# is what makes it able to beep about its own state. See the startup check.
+beep() {
+    [ -x "$ALARM_SH" ] || return 0
+    if [ "${2:-}" = once ]; then
+        # On the way down: one pattern, then get on with it.
+        "$ALARM_SH" --alert "$1" --once 2>/dev/null
+    else
+        # Never let the alarm hold up the fan: the purge zone needs its rewrite
+        # every INTERVAL seconds, and a repeated pattern takes far longer.
+        "$ALARM_SH" --alert "$1" >/dev/null 2>&1 &
+    fi
+}
 
-panic_do_reboot() {
+panic_latch_and_stop() {
     local why="$1"
-    echo "PANIC: $why — rebooting now" >&2
-    logger -p daemon.crit -t optiplex-fan "$why — rebooting" 2>/dev/null
-    printf '%s\t%s\n' "$(date -Is)" "reboot: $why" >> "$PANIC_FLAG" 2>/dev/null
+    echo "PANIC: $why — ${PANIC_ACTION}" >&2
+    logger -p daemon.crit -t optiplex-fan "$why — ${PANIC_ACTION}" 2>/dev/null
+    command -v wall >/dev/null 2>&1 && wall "optiplex-fan: $why — ${PANIC_ACTION}" 2>/dev/null
 
-    # Hand the fan over: if the reboot stalls, the EC has to be in charge, not a
-    # daemon that is about to disappear.
+    # Latch first, so a machine that dies anywhere below still comes back with
+    # the fan on the stock curve and beeping about it.
+    mkdir -p "$(dirname "$PANIC_FLAG")" 2>/dev/null
+    printf '%s\t%s\n' "$(date -Is)" "$why" >> "$PANIC_FLAG" 2>/dev/null
+
+    # Hand the fan over before going down: if the shutdown stalls, the EC has to
+    # be in charge, not a daemon that is about to disappear.
     echo 2 > "$PWM_ENABLE" 2>/dev/null
     mode=auto
     manual=0
 
-    # --force bypasses clean unmounting, so flush what we can first.
+    beep long once
+
     sync
-    systemctl reboot --force
+    systemctl "$PANIC_ACTION" --force
 
     # Do not exit: Restart=always would drag this daemon back mid-shutdown.
     # Keep feeding the watchdog until the machine actually goes down.
     while true; do ping_watchdog; nap 5; done
 }
 
-# Returns 0 if the machine was given a reprieve and normal operation resumes.
-# Otherwise it never returns — panic_do_reboot takes over.
+# Returns 0 if the machine came back down on its own and normal operation
+# resumes. Otherwise it never returns — panic_latch_and_stop takes over.
 panic_sequence() {
-    local t="$1" held=$(( PANIC_SAMPLES * INTERVAL ))
-    local msg="CPU ${t}C >= ${T_PANIC}C for ${held}s"
-    local waited=0 tnow cooled=0 watched=0 peak=0
+    local t="$1" waited=0 tnow
+    local msg="CPU ${t}C >= ${T_PANIC}C"
 
-    echo "PANIC: $msg — cooling to ${PANIC_COOL_TO}C" >&2
-    logger -p daemon.crit -t optiplex-fan "$msg — cooling to ${PANIC_COOL_TO}C" 2>/dev/null
-    command -v wall >/dev/null 2>&1 && wall "optiplex-fan: $msg — cooling down" 2>/dev/null
+    echo "PANIC: $msg — purge, ${PANIC_TIMEOUT}s to get back to ${PANIC_RECOVER}C" >&2
+    logger -p daemon.crit -t optiplex-fan "$msg — purge, ${PANIC_TIMEOUT}s to reach ${PANIC_RECOVER}C" 2>/dev/null
+    beep short
 
-    mkdir -p "$(dirname "$PANIC_FLAG")" 2>/dev/null
-    printf '%s\t%s\n' "$(date -Is)" "$msg" >> "$PANIC_FLAG" 2>/dev/null
-
-    # Latch before cooling, not after: if the machine dies anywhere in this
-    # sequence, the next boot must still come up stock. Undone on a reprieve.
-    # A disabled unit is exactly what optiplex-fan-alarm.service beeps three
-    # long beeps about at the next boot — this is the state it reports.
-    systemctl disable optiplex-fan.service 2>/dev/null
-    rm -f /etc/systemd/system/multi-user.target.wants/optiplex-fan.service 2>/dev/null
-
-    # --- 2. cool ---
     set_manual 255
     mode=purge
-    while (( waited < PANIC_COOL_TIMEOUT )); do
+    while (( waited < PANIC_TIMEOUT )); do
         echo 255 > "$PWM" 2>/dev/null
         if tnow=$(cat "$TEMP_INPUT" 2>/dev/null) && [ -n "$tnow" ]; then
             tnow=$(( tnow / 1000 ))
-            if (( tnow <= PANIC_COOL_TO )); then cooled=1; break; fi
-            echo "PANIC: cooling ${tnow}C -> ${PANIC_COOL_TO}C (${waited}s elapsed)"
+            if (( tnow <= PANIC_RECOVER )); then
+                echo "PANIC: recovered — ${tnow}C after ${waited}s, carrying on"
+                logger -p daemon.notice -t optiplex-fan "recovered to ${tnow}C after ${waited}s of purge" 2>/dev/null
+                return 0
+            fi
+            echo "PANIC: purging ${tnow}C -> ${PANIC_RECOVER}C (${waited}/${PANIC_TIMEOUT}s)"
         fi
         ping_watchdog
         nap "$INTERVAL"
         waited=$(( waited + INTERVAL ))
     done
 
-    if (( cooled == 0 )); then
-        panic_do_reboot "still above ${PANIC_COOL_TO}C after ${PANIC_COOL_TIMEOUT}s of purge"
-    fi
-
-    echo "PANIC: cooled to ${tnow}C after ${waited}s"
-
-    if (( PANIC_REPRIEVES <= 0 || panic_reprieves_used >= PANIC_REPRIEVES )); then
-        panic_do_reboot "cooled, but ${panic_reprieves_used} reprieve(s) already used"
-    fi
-
-    # --- 3. watch ---
-    # Normal zone control is back in charge here, so this measures the machine,
-    # not the purge.
-    echo "PANIC: watching ${PANIC_WATCH_SEC}s — reboot only if it climbs back to ${PANIC_WATCH_TRIP}C"
-    while (( watched < PANIC_WATCH_SEC )); do
-        if tnow=$(cat "$TEMP_INPUT" 2>/dev/null) && [ -n "$tnow" ]; then
-            tnow=$(( tnow / 1000 ))
-            (( tnow > peak )) && peak=$tnow
-            apply_zone "$tnow"
-            if (( tnow >= PANIC_WATCH_TRIP )); then
-                panic_do_reboot "climbed back to ${tnow}C within ${watched}s of cooling down"
-            fi
-        fi
-        ping_watchdog
-        nap "$INTERVAL"
-        watched=$(( watched + INTERVAL ))
-    done
-
-    # --- 4. reprieve ---
-    panic_reprieves_used=$(( panic_reprieves_used + 1 ))
-    local left=$(( PANIC_REPRIEVES - panic_reprieves_used ))
-    local note="recovered: stayed below ${PANIC_WATCH_TRIP}C for ${PANIC_WATCH_SEC}s (peak ${peak}C), no reboot; ${left} reprieve(s) left"
-    echo "PANIC: $note"
-    logger -p daemon.notice -t optiplex-fan "$note" 2>/dev/null
-    printf '%s\t%s\n' "$(date -Is)" "$note" >> "$PANIC_FLAG" 2>/dev/null
-
-    # Undo the latch — the machine is fine, so it should still start next boot.
-    systemctl enable optiplex-fan.service 2>/dev/null
-    return 0
+    panic_latch_and_stop "still above ${PANIC_RECOVER}C after ${PANIC_TIMEOUT}s of purge"
 }
+
+# Latched by an earlier trip: stay running, but control nothing. The unit is
+# still enabled precisely so this runs and says so — the fan is on the stock
+# BIOS curve until somebody clears the flag.
+if [ -e "$PANIC_FLAG" ]; then
+    echo "Panic brake latched — $PANIC_FLAG exists. Fan control is OFF (BIOS auto)."
+    echo "Last entry: $(tail -1 "$PANIC_FLAG" 2>/dev/null)"
+    echo "Clear it with: rm $PANIC_FLAG && systemctl restart optiplex-fan"
+    logger -p daemon.crit -t optiplex-fan "latched by the panic brake — fan control disabled, BIOS auto" 2>/dev/null
+    command -v systemd-notify >/dev/null 2>&1 && systemd-notify --ready
+    restore_bios
+    beep long
+    # Nothing to do but stay alive and keep saying so if anyone asks.
+    while true; do ping_watchdog; nap "$INTERVAL"; done
+fi
 
 echo "Four-zone fan control active."
 echo "  Temp source: $TEMP_INPUT"
@@ -380,9 +354,8 @@ else
     echo "  Purge zone: disabled (T_PURGE=0)"
 fi
 if (( T_PANIC > 0 )); then
-    echo "  Panic brake: ${T_PANIC}C held for $((PANIC_SAMPLES * INTERVAL))s -> purge down to"
-    echo "               ${PANIC_COOL_TO}C (max ${PANIC_COOL_TIMEOUT}s), then watch ${PANIC_WATCH_SEC}s;"
-    echo "               reboot only if it climbs back to ${PANIC_WATCH_TRIP}C. ${PANIC_REPRIEVES} reprieve(s)."
+    echo "  Panic brake: ${T_PANIC}C -> alarm + purge; ${PANIC_ACTION} unless it is back"
+    echo "               to ${PANIC_RECOVER}C within ${PANIC_TIMEOUT}s"
 else
     echo "  Panic brake: disabled (T_PANIC=0)"
 fi
@@ -393,26 +366,15 @@ while true; do
     if ! temp_raw=$(cat "$TEMP_INPUT" 2>/dev/null) || [ -z "$temp_raw" ]; then
         # No temperature means no safe way to hold any manual level.
         go_auto
-        panic_hits=0
         nap "$INTERVAL"
         continue
     fi
     t=$(( temp_raw / 1000 ))
 
     apply_zone "$t"
+    echo "temp=${t}C mode=${mode:-untouched} rpm=$(cat "$DELL_DIR/fan1_input" 2>/dev/null)"
 
-    # Require the reading to hold: a single sample over T_PANIC is a spike, and
-    # rebooting a server on a two-second spike would be far worse than the heat.
-    if (( T_PANIC > 0 && t >= T_PANIC )); then
-        panic_hits=$(( panic_hits + 1 ))
-        echo "temp=${t}C mode=${mode:-untouched} PANIC ${panic_hits}/${PANIC_SAMPLES}"
-        if (( panic_hits >= PANIC_SAMPLES )); then
-            panic_sequence "$t" && panic_hits=0
-        fi
-    else
-        panic_hits=0
-        echo "temp=${t}C mode=${mode:-untouched} rpm=$(cat "$DELL_DIR/fan1_input" 2>/dev/null)"
-    fi
+    (( T_PANIC > 0 && t >= T_PANIC )) && panic_sequence "$t"
 
     ping_watchdog
     nap "$INTERVAL"

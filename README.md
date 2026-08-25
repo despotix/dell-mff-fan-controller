@@ -17,10 +17,10 @@ English · [українською](README.ua.md)
   room; this daemon actually uses the quiet level instead.
 - **Aggressive ramp under load**, forcing full speed where the stock curve
   steps too late and lets the package run hotter than it needs to.
-- **Overheat protection with an audible alarm.** An optional emergency brake
-  reboots the machine if cooling ever loses the race, and a separate alarm
-  daemon beeps the internal speaker at boot if the fan controller itself isn't
-  running — so a silent failure doesn't stay silent.
+- **Overheat protection with an audible alarm.** At 95°C the box beeps and goes
+  to full purge; if it cannot get back under 80°C within two minutes, one long
+  beep and it powers itself off. It comes back with fan control latched off,
+  beeping to say so — a silent failure never stays silent.
 
 ## Install
 
@@ -195,14 +195,11 @@ journal output is for grepping.
 | `T_HOT_HYST` | 5 | °C below `T_BOOST` / `T_PURGE` before releasing those zones |
 | `QUIET_PWM` | 0 | level held while quiet; 0-175 all give ~1130 RPM, higher is clamped |
 | `INTERVAL` | 2 | seconds between temperature checks (clamped to 1..10) |
-| `T_PANIC` | 0 | °C for the emergency reboot brake; `0` (default) disables it |
-| `PANIC_SAMPLES` | 5 | consecutive readings at `T_PANIC` required to trip it |
-| `PANIC_COOL_TO` | 75 | °C the package must reach before the brake goes further |
-| `PANIC_COOL_TIMEOUT` | 180 | seconds to wait for that before rebooting anyway |
-| `PANIC_WATCH_SEC` | 60 | seconds to watch after cooling, before deciding |
-| `PANIC_WATCH_TRIP` | 80 | °C that, if reached within the watch, means reboot |
-| `PANIC_REPRIEVES` | 2 | how many times recovery may be forgiven; `0` = never |
-| `ALARM` | 1 | beep at boot if the daemon is not running; `0` disables |
+| `T_PANIC` | 0 | °C that sounds the alarm and starts the deadline; `0` (default) disables it |
+| `PANIC_RECOVER` | 80 | °C it has to get back down to |
+| `PANIC_TIMEOUT` | 120 | seconds allowed to get there |
+| `PANIC_ACTION` | poweroff | what to do if it does not: `poweroff` or `reboot` |
+| `ALARM` | 1 | the audible alarm, boot check included; `0` disables all of it |
 | `ALARM_DELAY` | 30 | seconds into the boot before the check |
 | `ALARM_REPEATS` | 3 | how many times the whole signal is played |
 | `ALARM_RETRIES` | 3 | attempts when a beep does not play at all (busy card) |
@@ -256,88 +253,88 @@ On any model other than the 7080 Micro, start with `sudo ./pwm-sweep.sh`: the
 level boundaries above were measured, not derived from a datasheet, and yours
 may sit elsewhere.
 
-## Emergency reboot brake — off by default
+## Overheat protection — off by default
 
 Shipped disabled (`T_PANIC=0`); `install.sh` asks separately whether to enable
-it. Force-rebooting a server is too blunt an action to inherit along with the
+it. Shutting a server down is too blunt an action to inherit along with the
 defaults.
 
-When enabled and the CPU holds at `T_PANIC` for `PANIC_SAMPLES` consecutive
-readings — meaning the fan is already flat out and losing — the daemon:
+One rule, with a deadline. When the package reaches `T_PANIC` (95°C) — the fan
+is already flat out from the purge zone and still losing — the daemon:
 
-1. **latches** — logs to the journal, `wall` and `/var/lib/optiplex-fan/panic`,
-   then disables its own unit. This is what stops it from becoming a reboot
-   loop, and it happens first so that a crash anywhere later still boots stock;
-2. **cools** — holds the fan in purge until the package is down to
-   `PANIC_COOL_TO` (75°C). Nothing controls the fan through POST, so rebooting
-   a hot CPU would coast it through the restart with no airflow at exactly the
-   wrong moment. `PANIC_COOL_TIMEOUT` bounds the wait: if the heat source is
-   still running, cooling may never finish, and rebooting is then the lesser
-   evil;
-3. **watches** — hands the fan back to normal zone control and observes for
-   `PANIC_WATCH_SEC` (60 s). This measures the machine, not the purge;
-4. **decides** — if the package climbed back to `PANIC_WATCH_TRIP` (80°C) within
-   that window, it reboots. If it stayed below, the machine has recovered:
-   the unit is re-enabled, the reprieve is logged, and work carries on.
-   Rebooting a machine that just cooled down and stayed cool would be pure
-   damage.
+1. **sounds the alarm** — two short beeps on the internal speaker, logged to the
+   journal, and holds the fan in purge;
+2. **waits** — `PANIC_TIMEOUT` (120 s) for the package to come back down to
+   `PANIC_RECOVER` (80°C).
 
-`PANIC_REPRIEVES` (2) bounds the mercy. Without it a permanently overloaded box
-would cycle heat → cool → reprieve → heat forever and the brake would never do
-its job; after that many reprieves the next trip reboots with no watch at all.
-Set it to 0 to reboot on the first trip.
+If it gets there, that is the end of it: the alarm was enough, normal zone
+control resumes and work carries on. If the timeout runs out with the package
+still above `PANIC_RECOVER`, the cooling has lost — one long beep, and
+`PANIC_ACTION`.
 
-The reboot itself hands the fan back to the BIOS first, so a stalled shutdown
-cannot leave it on a manual level, then `sync` and `systemctl reboot --force`.
+**Powering off is the default**, not rebooting. A package that could not be
+cooled while running will not be cooled by coming straight back up into the same
+workload, and nothing drives the fan through POST at all. Set
+`PANIC_ACTION=reboot` for a machine that has to come back on its own.
+
+Either way the daemon latches first, by writing `/var/lib/optiplex-fan/panic`,
+so a box that dies anywhere in the sequence still comes back in a known state.
+It then hands the fan to the BIOS — a stalled shutdown must not leave it on a
+manual level — and does `sync` before `systemctl <action> --force`.
+
+**The latch is a file, not a disabled unit.** On the next boot
+`optiplex-fan.service` still starts; it reads the flag, controls nothing, leaves
+the fan on the stock BIOS curve, and beeps three long beeps to say so. That is
+the whole reason it is a file: a disabled unit cannot announce itself. Once you
+have dealt with the cause:
+
+```bash
+sudo rm /var/lib/optiplex-fan/panic
+sudo systemctl restart optiplex-fan
+```
 
 Pick the threshold from measurements, not intuition. On this machine a full load
 reaches 91°C, so a brake at 85 would have fired 136 seconds into any serious
 build or backup. 95°C leaves room above real workloads and still sits below
-`crit=100`. The hold requirement exists so a two-second spike cannot reboot the
-box.
+`crit=100`. The two-minute deadline is what keeps a spike from mattering: a
+brief peak is back under 80°C long before it expires.
 
 Note that `--force` skips the normal unmount; the `sync` before it reduces the
 risk but does not remove it.
 
-**After it trips, the service stays disabled.** Once you have dealt with the
-cause:
+## The audible alarm
 
-```bash
-sudo rm /var/lib/optiplex-fan/panic
-sudo systemctl enable --now optiplex-fan
-```
+Everything above fails safe into the BIOS curve, correctly and completely
+silently: the machine that most needed the daemon is exactly the one running the
+stock curve — quiet idle gone, boost zone gone, brake gone — with nothing to say
+so. `optiplex-fan-alarm.sh` is that missing sentence.
 
-## Beep at boot when the daemon is not running
-
-Everything above fails safe into the BIOS curve, and the panic brake goes one
-further by disabling its own unit before rebooting. Both are correct, and both
-are completely silent: the machine that most needed the daemon is exactly the
-one that comes back without it, running the stock curve — quiet idle gone, boost
-zone gone, brake gone — with nothing to say so.
-
-`optiplex-fan-alarm.service` is that missing sentence. Once per boot it waits
-`ALARM_DELAY` seconds, looks at `optiplex-fan.service`, and if it is not
-running, beeps the internal speaker and exits.
+Two patterns, because they mean different things:
 
 | what you hear | what it means |
 |---|---|
-| two short beeps | the unit is enabled but did not start |
-| three long beeps | the unit is **disabled** — which is what the panic brake leaves behind |
-| nothing | the daemon is running |
+| two short beeps | trouble now — the daemon is not running, or the brake has just tripped and is purging |
+| three long beeps | fan control is **off** — the brake latched, or the daemon failed to start and is latched |
+| nothing | the daemon is running normally |
 
-It is a separate unit on purpose. What it reports on is `optiplex-fan.service`
-being absent, so it cannot live inside it, and the panic latch — which disables
-that unit — must not be able to switch off the alarm along with it.
+Who makes them: the daemon calls the script directly (`--alert short|long`) for
+the panic beeps and for the latched announcement it makes on the way up. On top
+of that, `optiplex-fan-alarm.service` waits `ALARM_DELAY` seconds once per boot
+and beeps if `optiplex-fan.service` is not running at all — the one case a dead
+daemon cannot report on itself. It is a separate unit for exactly that reason.
+A latched daemon is running, so the boot check stays quiet and lets the daemon
+speak for itself instead of saying the same thing twice.
 
 The signal plays `ALARM_REPEATS` times — three by default — and then the alarm
-is done until the next boot. It is meant to read as an error rather than a
-notification: short hard beeps, near full amplitude. Nothing beeps while the
-daemon is running, so a beep from this box always means the same thing.
+is done. It is meant to read as an error rather than a notification: short hard
+beeps, near full amplitude. Nothing beeps while the daemon is working normally,
+so a beep from this box always means something is wrong.
 
 ```bash
-sudo optiplex-fan-alarm.sh --test    # beep now, whatever the daemon is doing
-sudo optiplex-fan-alarm.sh --check   # state and backend, no sound
-sudo optiplex-fan-alarm.sh --now     # the boot check, without the delay
+sudo optiplex-fan-alarm.sh --test          # beep now, whatever the daemon is doing
+sudo optiplex-fan-alarm.sh --check         # state, latch and backend, no sound
+sudo optiplex-fan-alarm.sh --now           # the boot check, without the delay
+sudo optiplex-fan-alarm.sh --alert long    # play a specific pattern
 ```
 
 **How it makes a sound.** `ALARM_BACKEND=auto` prefers `beep(1)` if it is
@@ -369,7 +366,7 @@ mute; `--check` reports `backend: none`, and the installer warns before you
 commit to it.
 
 Running `thermal-test.sh` or `pwm-sweep.sh` with the service stopped will not
-set it off: the check happens once per boot, not continuously.
+set the boot check off: it happens once per boot, not continuously.
 
 ## Diagnostics
 

@@ -9,7 +9,7 @@ MU_NEED_ROOT="Run with sudo: sudo ./uninstall.sh"
 MU_REMOVED="Service removed. BIOS automatic fan control was restored when the service stopped."
 MU_ALARM_REMOVED="Boot alarm removed too — nothing will beep at the next boot."
 MU_CONF_KEPT="Config /etc/optiplex-fan.conf left in place — remove it by hand if you want: sudo rm /etc/optiplex-fan.conf"
-MU_PANIC_KEPT="Panic-brake trace left in place: /var/lib/optiplex-fan/panic"
+MU_PANIC_KEPT="Overheat-brake latch left in place: /var/lib/optiplex-fan/panic"
 [ -r "$SRC_DIR/lang/load.sh" ] && . "$SRC_DIR/lang/load.sh"
 
 if [ "$EUID" -ne 0 ]; then

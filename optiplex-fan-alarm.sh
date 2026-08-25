@@ -1,29 +1,29 @@
 #!/bin/bash
-# Beeps at boot if the fan daemon did not come up.
+# Makes the noise for optiplex-fan: at boot if the daemon did not come up, and
+# on demand for the daemon itself.
 #
-# The daemon fails safe: every exit path hands the fan back to the BIOS, and the
-# panic brake goes one further — it disables its own unit before rebooting, so a
-# box that gave up on cooling comes back stock with nothing started. That is the
-# right behaviour and it is completely silent, which is the problem: a headless
-# machine gives no sign that the quiet idle, the boost zone and the brake itself
-# are all gone until somebody next looks at it.
+# The daemon fails safe: every exit path hands the fan back to the BIOS. That is
+# the right behaviour and it is completely silent, which is the problem: a
+# headless machine gives no sign that the quiet idle, the boost zone and the
+# brake itself are gone until somebody next looks at it.
 #
-# So: one check, ALARM_DELAY seconds into the boot, and if optiplex-fan is not
-# running, beep the box's own speaker. Two cases, told apart because they mean
-# different things:
+# Two patterns, because they mean different things:
 #
-#   unit enabled, not running   two short beeps    it failed to start
-#   unit disabled               three long beeps   the panic brake latched it
+#   two short beeps    trouble now — the daemon is not running, or the panic
+#                      brake has just tripped and is purging
+#   three long beeps   fan control is OFF — the panic brake latched, and the
+#                      box is on the stock BIOS curve until the flag is cleared
 #
-# It says its piece and exits. Nothing nags afterwards, and nothing beeps while
-# the daemon is running — a beep from this box always means the same thing.
+# As a unit it does one check, ALARM_DELAY seconds into the boot, then exits.
+# Nothing nags afterwards. The daemon calls it directly (--alert) for the panic
+# beeps, which is why the patterns live here and not in two places.
 #
 # Separate unit on purpose: what it reports on is the fan daemon not running, so
-# it cannot live inside that daemon, and the panic latch — which disables
-# optiplex-fan.service — must not be able to switch off the alarm with it.
+# it cannot live inside that daemon.
 #
 # Usage: optiplex-fan-alarm.sh          check once and beep if needed (the unit)
 #        optiplex-fan-alarm.sh --now    the same check with no start-up delay
+#        optiplex-fan-alarm.sh --alert short|long   play that pattern, repeated
 #        optiplex-fan-alarm.sh --test   beep the alert pattern and exit
 #        optiplex-fan-alarm.sh --check  report state and backend, make no sound
 #        optiplex-fan-alarm.sh --devices list the ALSA outputs it would try
@@ -36,6 +36,7 @@ CONF=${CONF:-/etc/optiplex-fan.conf}
 
 ALARM=${ALARM:-1}
 ALARM_UNIT=${ALARM_UNIT:-optiplex-fan.service}
+PANIC_FLAG=${PANIC_FLAG:-/var/lib/optiplex-fan/panic}
 ALARM_DELAY=${ALARM_DELAY:-30}
 ALARM_REPEATS=${ALARM_REPEATS:-3}
 ALARM_REPEAT_GAP=${ALARM_REPEAT_GAP:-5}
@@ -320,22 +321,22 @@ pattern() {
 
 # --- what the beeps mean ----------------------------------------------------
 
-unit_active()  { systemctl is-active  --quiet "$ALARM_UNIT"; }
-unit_enabled() { systemctl is-enabled --quiet "$ALARM_UNIT" 2>/dev/null; }
+unit_active() { systemctl is-active --quiet "$ALARM_UNIT"; }
+latched()     { [ -e "$PANIC_FLAG" ]; }
 
-# Two short: enabled but not running, so it tried and failed (or someone stopped
-# it before this check). Three long: the unit is disabled, which is exactly what
-# the panic brake leaves behind — that machine rebooted itself and came back
-# stock, and nobody has looked at it since.
+# Two short: the daemon is not running, so it tried and failed (or someone
+# stopped it), and the fan is on the stock curve. Three long: the panic brake
+# latched — the daemon is running but controlling nothing, which is a state
+# somebody has to come and clear.
 #
 # It is meant to read as an error, not as a notification: short, hard beeps at
 # full amplitude, repeated. The counts and lengths are knobs, but the defaults
 # are the signal.
 alert_pattern() {
-    if unit_enabled; then
-        pattern "$ALARM_BEEPS" "$ALARM_LEN"
-    else
+    if [ "$PATTERN" = long ]; then
         pattern "$ALARM_LONG_BEEPS" "$ALARM_LONG_LEN"
+    else
+        pattern "$ALARM_BEEPS" "$ALARM_LEN"
     fi
 }
 
@@ -360,12 +361,16 @@ alert() {
 }
 
 why_down() {
-    if unit_enabled; then
-        echo "$ALARM_UNIT did not start — the fan is on the stock BIOS curve"
+    if latched; then
+        echo "the panic brake is latched ($PANIC_FLAG) — fan control is off, the fan is on the stock BIOS curve"
     else
-        echo "$ALARM_UNIT is disabled and did not start — the panic brake latches it exactly like this; the fan is on the stock BIOS curve"
+        echo "$ALARM_UNIT is not running — the fan is on the stock BIOS curve"
     fi
 }
+
+# short unless something says otherwise; --alert and the boot check both set it.
+PATTERN=short
+latched && PATTERN=long
 
 detect_backend
 
@@ -379,10 +384,26 @@ case "${1:-}" in
         alert_pattern
         exit $?    # the EXIT trap puts the mixer back
         ;;
+    --alert)
+        # What the daemon calls: the pattern is named by the caller, because it
+        # knows what happened. ALARM=0 silences this too — one switch for all of
+        # it, or the "off" in the config would not mean off.
+        (( ALARM == 0 )) && exit 0
+        case "${2:-}" in
+            long|short) PATTERN=$2 ;;
+            *) echo "usage: $0 --alert short|long [--once]" >&2; exit 2 ;;
+        esac
+        # --once plays the pattern a single time instead of the full repeat
+        # cycle: the daemon uses it on the way to a shutdown, where fifteen
+        # seconds of repeats would hold up an overheating box for no gain.
+        if [ "${3:-}" = --once ]; then alert_pattern; else alert; fi
+        exit $?
+        ;;
     --check)
         echo "unit:    $ALARM_UNIT"
         echo "active:  $(systemctl is-active "$ALARM_UNIT" 2>/dev/null)"
         echo "enabled: $(systemctl is-enabled "$ALARM_UNIT" 2>/dev/null)"
+        echo "latched: $(latched && echo "yes — $PANIC_FLAG (fan control is off)" || echo no)"
         echo "backend: $BACKEND${CONSOLE:+ ($CONSOLE)}${ALSA_DEVS:+ ($(echo $ALSA_DEVS | tr '\n' ' '))}"
         [ "$BACKEND" = alsa ] && [ -n "$ALARM_ALSA_MIXER" ] &&
             echo "mixer:   raises $ALARM_ALSA_MIXER to ${ALARM_ALSA_LEVEL}% for the beep, then restores"
@@ -408,8 +429,11 @@ fi
 
 (( ALARM_DELAY > 0 )) && sleep "$ALARM_DELAY"
 
+# A latched daemon is still running, and it beeps for itself on the way up — so
+# this stays quiet rather than saying the same thing twice. What is left here is
+# the case the daemon cannot report: it is not running at all.
 if unit_active; then
-    echo "$ALARM_UNIT is running — no alarm."
+    echo "$ALARM_UNIT is running$(latched && echo " (latched — it beeps for itself)") — no alarm."
     exit 0
 fi
 

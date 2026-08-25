@@ -24,8 +24,8 @@ SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # English is defined here; lang/load.sh overrides it when FANCTL_LANG is set.
 # %s conversions must survive translation in the same order.
 MI_NEED_ROOT="Run with sudo: sudo ./install.sh"
-MI_PANIC_TRIPPED="!! The panic brake has tripped before — the service disabled itself:"
-MI_PANIC_TRACE="   Trace: %s (remove it once you have dealt with the cause)\n"
+MI_PANIC_TRIPPED="!! The overheat brake is latched — fan control is OFF until this is cleared:"
+MI_PANIC_TRACE="   Latch: %s (remove it once you have dealt with the cause)\n"
 MI_ENTER_INT="  Enter a whole number between %s and %s.\n"
 MI_ANSWER_YN="  Answer y or n."
 MI_PROBE_NO_DELL="   dell_smm hwmon not found — skipping the probe."
@@ -70,42 +70,35 @@ MI_Q_OFF="0 = off"
 MI_Q_THOTHYST="T_HOT_HYST — degrees below the threshold before releasing the top zones"
 MI_Q_QUIETPWM="QUIET_PWM — level held while quiet"
 MI_Q_INTERVAL="INTERVAL — seconds between temperature checks"
-MI_PANIC_HEADER="== Panic brake (optional) =="
-MI_PANIC_WHAT="If the CPU holds at T_PANIC for that many consecutive readings — meaning
-the fan is already flat out and losing — the daemon:
-  1. disables its own unit (so this cannot become a reboot loop)
-  2. runs purge until the package cools to PANIC_COOL_TO
-  3. hands control back and watches for PANIC_WATCH_SEC
-  4. reboots ONLY if the temperature climbs back to PANIC_WATCH_TRIP;
-     otherwise it is a reprieve: the unit is re-enabled and work goes on"
+MI_PANIC_HEADER="== Overheat protection (optional) =="
+MI_PANIC_WHAT="If the CPU reaches T_PANIC — the fan is already flat out and losing —
+the daemon sounds the alarm and holds the fan in purge. It then has
+PANIC_TIMEOUT seconds to get the package back down to PANIC_RECOVER:
+  reached it   the alarm was enough, work carries on as normal
+  did not      one long beep, and the machine is powered off
+A machine that shuts down this way comes back with fan control OFF: the
+service still starts, but it only beeps to say it is latched, until you
+remove /var/lib/optiplex-fan/panic."
 MI_PANIC_AGAINST="Against it: --force skips the normal unmount, and the threshold has to
 sit above what real workloads reach — 91C was measured here under full
-load, with the CPU throttling at 100C. Too low a threshold means a
-server reboot in the middle of an ordinary build."
-MI_PANIC_ASK="Enable the panic brake?"
-MI_Q_TPANIC="T_PANIC — temperature (C) that triggers the brake"
-MI_Q_PSAMPLES="PANIC_SAMPLES — consecutive readings required to trip it"
-MI_PANIC_COOL_WHY="   Before rebooting, the daemon holds the fan in purge until the package
-   cools: nothing drives the fan through POST, so a hot CPU would coast
-   through the restart with no airflow."
-MI_Q_COOLTO="PANIC_COOL_TO — cool to this temperature (C) before rebooting"
-MI_Q_COOLTMO="PANIC_COOL_TIMEOUT — seconds to wait for that at most"
-MI_PANIC_WATCH_WHY="   After cooling it watches: a machine that stays cool has recovered,
-   and rebooting it would be pure damage."
-MI_Q_WATCHSEC="PANIC_WATCH_SEC — seconds to watch after cooling"
-MI_Q_WATCHTRIP="PANIC_WATCH_TRIP — temperature (C) that, if reached in that window, means reboot"
-MI_PANIC_LOOP_WHY="   Without a bound this can cycle forever: heat -> cool -> reprieve ->
-   heat, and the brake never does its job. 0 = always reboot at once."
-MI_Q_REPRIEVES="PANIC_REPRIEVES — how many reprieves are allowed"
+load, with the CPU throttling at 100C. Too low a threshold means the
+server shutting down in the middle of an ordinary build."
+MI_PANIC_ASK="Enable overheat protection?"
+MI_Q_TPANIC="T_PANIC — temperature (C) that triggers the alarm and purge"
+MI_Q_PRECOVER="PANIC_RECOVER — temperature (C) it has to get back down to"
+MI_Q_PTIMEOUT="PANIC_TIMEOUT — seconds allowed to get there"
+MI_PANIC_ACTION_WHY="   Powering off is the safer end: a package that could not be cooled while
+   running will not be cooled by coming straight back up into the same
+   workload, and nothing drives the fan through POST at all."
+MI_Q_PACTION="PANIC_ACTION — what to do when it does not recover [poweroff/reboot] (%s): "
 MI_SUM_HEAD="Summary: quiet below %sC, BIOS auto from %sC, checked every %ss\n"
 MI_SUM_BOOST="         boost from %sC (releases below %sC)\n"
 MI_SUM_BOOST_OFF="         boost disabled"
 MI_SUM_PURGE="         purge from %sC (releases below %sC)\n"
 MI_SUM_PURGE_OFF="         purge disabled"
-MI_SUM_PANIC="         panic brake at %sC held for %ss,
-         cool to %sC (max %ss), watch %ss,
-         reboot only if it returns to %sC; %s reprieve(s) allowed\n"
-MI_SUM_PANIC_OFF="         panic brake disabled"
+MI_SUM_PANIC="         overheat protection: alarm + purge at %sC,
+         %s unless it is back to %sC within %ss\n"
+MI_SUM_PANIC_OFF="         overheat protection disabled"
 MI_CONFIRM="Write these to %s and continue installing? [Y/n]: "
 MI_CANCELLED="Cancelled, nothing changed."
 MI_NONINTERACTIVE="Non-interactive: using %s.\n"
@@ -116,17 +109,18 @@ MI_DONE="Installed and running with %s.\n"
 MI_HINT_STATUS="Status:   systemctl status optiplex-fan"
 MI_HINT_LOG="Live log: journalctl -u optiplex-fan -f"
 MI_HINT_RECONF="Reconfigure: sudo ./install.sh   (same prompts, current values as defaults)"
-MI_ALARM_HEADER="== Beep at boot if the daemon did not start (optional) =="
-MI_ALARM_WHAT="Every failure path here ends in BIOS auto, and the panic brake disables
-the unit before rebooting — so a box that gave up on cooling comes back
-stock, quiet, and says nothing about it. A second, tiny service checks
-%ss into each boot whether optiplex-fan is running, and if it is not,
-beeps the internal speaker:
-  two short beeps    the unit is enabled but did not start
-  three long beeps   the unit is disabled — what the panic brake leaves
-Then it exits. Nothing beeps while the daemon is running, and nothing
-nags afterwards. It is a separate unit so the panic latch cannot mute it."
-MI_ALARM_ASK="Install the boot beep?"
+MI_ALARM_HEADER="== Audible alarm (optional) =="
+MI_ALARM_WHAT="Every failure path here ends in BIOS auto — quietly, saying nothing
+about it. The alarm is what says something, through the internal
+speaker:
+  two short beeps    trouble now: the daemon is not running, or the
+                     overheat brake has tripped and is purging
+  three long beeps   fan control is OFF: the brake latched, and the box
+                     is on the stock BIOS curve until you clear it
+The daemon beeps for itself, and a second, tiny service checks %ss into
+each boot whether optiplex-fan is running at all — that is the one case
+a dead daemon cannot report. Then it exits; nothing nags afterwards."
+MI_ALARM_ASK="Install the audible alarm?"
 MI_ALARM_NO_SOUND="   Note: no PC speaker (pcspkr) and no sound card found here. Installing
    anyway — it still logs, and the speaker may only show up after a
    reboot. See ALARM_BACKEND in the config."
@@ -165,12 +159,9 @@ T_HOT_HYST=5
 QUIET_PWM=0
 INTERVAL=2
 T_PANIC=0
-PANIC_SAMPLES=5
-PANIC_COOL_TO=75
-PANIC_COOL_TIMEOUT=180
-PANIC_WATCH_SEC=60
-PANIC_WATCH_TRIP=80
-PANIC_REPRIEVES=2
+PANIC_RECOVER=80
+PANIC_TIMEOUT=120
+PANIC_ACTION=poweroff
 ALARM=1
 ALARM_DELAY=30
 ALARM_REPEATS=3
@@ -187,12 +178,10 @@ T_HOT_HYST=${T_HOT_HYST:-5}
 QUIET_PWM=${QUIET_PWM:-0}
 INTERVAL=${INTERVAL:-2}
 T_PANIC=${T_PANIC:-0}
-PANIC_SAMPLES=${PANIC_SAMPLES:-5}
-PANIC_COOL_TO=${PANIC_COOL_TO:-75}
-PANIC_COOL_TIMEOUT=${PANIC_COOL_TIMEOUT:-180}
-PANIC_WATCH_SEC=${PANIC_WATCH_SEC:-60}
-PANIC_WATCH_TRIP=${PANIC_WATCH_TRIP:-80}
-PANIC_REPRIEVES=${PANIC_REPRIEVES:-2}
+# PANIC_COOL_TO / PANIC_COOL_TIMEOUT are the old names for these two.
+PANIC_RECOVER=${PANIC_RECOVER:-${PANIC_COOL_TO:-80}}
+PANIC_TIMEOUT=${PANIC_TIMEOUT:-${PANIC_COOL_TIMEOUT:-120}}
+PANIC_ACTION=${PANIC_ACTION:-poweroff}
 ALARM=${ALARM:-1}
 ALARM_DELAY=${ALARM_DELAY:-30}
 ALARM_REPEATS=${ALARM_REPEATS:-3}
@@ -389,22 +378,23 @@ if [ "$INTERACTIVE" -eq 1 ]; then
     echo "$MI_PANIC_AGAINST"
     echo
     # Off by default: this machine legitimately reaches 91C under full load, so
-    # a reboot brake is a deliberate choice, not something to inherit.
+    # shutting the box down is a deliberate choice, not something to inherit.
     panic_default=n
     (( T_PANIC > 0 )) && panic_default=y
     if prompt_yesno "$MI_PANIC_ASK" "$panic_default"; then
         # Coming back from disabled, offer a sensible default rather than 0.
         (( T_PANIC == 0 )) && T_PANIC=95
         T_PANIC=$(prompt_int "$MI_Q_TPANIC" "$T_PANIC" 1 99)
-        PANIC_SAMPLES=$(prompt_int "$MI_Q_PSAMPLES" "$PANIC_SAMPLES" 1 60)
-        echo "$MI_PANIC_COOL_WHY"
-        PANIC_COOL_TO=$(prompt_int "$MI_Q_COOLTO" "$PANIC_COOL_TO" 30 $(( T_PANIC - 1 )))
-        PANIC_COOL_TIMEOUT=$(prompt_int "$MI_Q_COOLTMO" "$PANIC_COOL_TIMEOUT" 10 3600)
-        echo "$MI_PANIC_WATCH_WHY"
-        PANIC_WATCH_SEC=$(prompt_int "$MI_Q_WATCHSEC" "$PANIC_WATCH_SEC" 10 3600)
-        PANIC_WATCH_TRIP=$(prompt_int "$MI_Q_WATCHTRIP" "$PANIC_WATCH_TRIP" $(( PANIC_COOL_TO + 1 )) 99)
-        echo "$MI_PANIC_LOOP_WHY"
-        PANIC_REPRIEVES=$(prompt_int "$MI_Q_REPRIEVES" "$PANIC_REPRIEVES" 0 100)
+        PANIC_RECOVER=$(prompt_int "$MI_Q_PRECOVER" "$PANIC_RECOVER" 30 $(( T_PANIC - 1 )))
+        PANIC_TIMEOUT=$(prompt_int "$MI_Q_PTIMEOUT" "$PANIC_TIMEOUT" 10 3600)
+        echo "$MI_PANIC_ACTION_WHY"
+        while true; do
+            read -r -p "$(printf "$MI_Q_PACTION" "$PANIC_ACTION")" panic_action_ans </dev/tty
+            panic_action_ans=${panic_action_ans:-$PANIC_ACTION}
+            case "$panic_action_ans" in
+                poweroff|reboot) PANIC_ACTION=$panic_action_ans; break ;;
+            esac
+        done
     else
         T_PANIC=0
     fi
@@ -474,8 +464,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
         echo "$MI_SUM_PURGE_OFF"
     fi
     if (( T_PANIC > 0 )); then
-        printf "$MI_SUM_PANIC" "$T_PANIC" "$((PANIC_SAMPLES * INTERVAL))" "$PANIC_COOL_TO" \
-               "$PANIC_COOL_TIMEOUT" "$PANIC_WATCH_SEC" "$PANIC_WATCH_TRIP" "$PANIC_REPRIEVES"
+        printf "$MI_SUM_PANIC" "$T_PANIC" "$PANIC_ACTION" "$PANIC_RECOVER" "$PANIC_TIMEOUT"
     else
         echo "$MI_SUM_PANIC_OFF"
     fi
@@ -519,46 +508,35 @@ cat > "$CONF_FILE" <<EOF
 #                back to the BIOS. Separate from T_HYST because the top zone
 #                wants a tighter grip: once the fan is flat out it should stay
 #                there until the package has genuinely come down.
-# T_PANIC:       CPU temperature (C) at which the daemon gives up: it disables
-#                its own systemd unit and forces a reboot, so the machine comes
-#                back on the untouched BIOS fan curve with no daemon running.
-#                Disabling the unit first is what keeps this from looping. By
-#                this point the fan is already flat out from T_HOT, so the
-#                reboot is a get-to-a-known-state measure, not extra cooling.
-#                Keep it above T_HOT and above what real workloads reach — this
-#                CPU is measured at 91C under full load and throttles at 100.
-#                0 disables the brake, and that is the default: a forced reboot
-#                is a deliberate choice, not something to inherit by accident.
-# PANIC_SAMPLES: consecutive readings at or above T_PANIC required to trip it.
-#                A single sample is a spike; rebooting on one would be worse
-#                than the heat. PANIC_SAMPLES * INTERVAL is the real hold time.
-# PANIC_COOL_TO: the brake does not reboot straight away. Nothing controls the
-#                fan through POST, so a hot package would coast through the
-#                reboot with no airflow. It holds the fan in purge until the
-#                package reaches this temperature, and only then goes down.
-# PANIC_COOL_TIMEOUT:
-#                upper bound on that wait, in seconds. If the heat source is
-#                still running, cooling may never finish, and at that point
-#                rebooting is the lesser evil.
-# PANIC_WATCH_SEC / PANIC_WATCH_TRIP:
-#                after cooling, normal zone control resumes and the daemon
-#                watches for this many seconds. A machine that cooled down and
-#                stays cool has recovered, and rebooting it would be pure
-#                damage; only one that climbs straight back to PANIC_WATCH_TRIP
-#                gets rebooted. Otherwise the unit is re-enabled and work goes
-#                on as if nothing happened.
-# PANIC_REPRIEVES:
-#                how many times that reprieve may be granted. Without a bound, a
-#                permanently overloaded box would cycle heat -> cool -> reprieve
-#                forever and the brake would never do its job. 0 means reboot on
-#                the first trip, with no watch at all.
-# ALARM:         beep the internal speaker at boot if optiplex-fan.service is
-#                not running. Everything above fails safe into the BIOS curve
-#                without a word, and the panic brake disables the unit before
-#                rebooting, so the machine that needed it most comes back stock
-#                and silent. Two short beeps mean the unit is enabled but did
-#                not start; three long ones mean it is disabled, which is what
-#                the brake leaves behind. 0 disables the alarm.
+# T_PANIC:       CPU temperature (C) at which the daemon sounds the alarm and
+#                holds the fan in purge. By this point the fan is already flat
+#                out from T_PURGE, so this is not extra cooling — it is the
+#                point at which losing the race stops being acceptable.
+#                Keep it above T_PURGE and above what real workloads reach —
+#                this CPU is measured at 91C under full load and throttles at
+#                100. 0 disables the whole brake, and that is the default.
+# PANIC_RECOVER: the temperature (C) it has to get back down to. Reaching it
+#                means the alarm was enough and work carries on as normal.
+# PANIC_TIMEOUT: seconds allowed to get there. If the package is still above
+#                PANIC_RECOVER when they run out, the cooling has lost: one
+#                long beep, and PANIC_ACTION.
+# PANIC_ACTION:  poweroff (default) or reboot. Powering off is the safer end —
+#                a package that could not be cooled while running will not be
+#                cooled by coming straight back up into the same workload, and
+#                nothing drives the fan through POST at all. reboot is for a
+#                machine that has to come back on its own.
+#                Either way the daemon latches first, by writing
+#                /var/lib/optiplex-fan/panic. On the next boot the service
+#                still starts — it just controls nothing and beeps to say so,
+#                which is why the latch is a file and not a disabled unit.
+#                Remove that file to hand control back.
+# ALARM:         beep the internal speaker. At boot, if optiplex-fan.service is
+#                not running; and on demand for the daemon, which is how the
+#                panic beeps get made. Everything here fails safe into the BIOS
+#                curve without a word, so a silent box is exactly the one that
+#                needs to say something. Two short beeps mean trouble now (not
+#                running, or the brake purging); three long ones mean fan
+#                control is off and latched. 0 disables the alarm entirely.
 # ALARM_DELAY:   seconds into the boot before the check, so a daemon that is
 #                still coming up is not reported as dead.
 # ALARM_REPEATS: how many times the whole signal is played. Separate from
@@ -598,12 +576,9 @@ T_HOT_HYST=$T_HOT_HYST
 QUIET_PWM=$QUIET_PWM
 INTERVAL=$INTERVAL
 T_PANIC=$T_PANIC
-PANIC_SAMPLES=$PANIC_SAMPLES
-PANIC_COOL_TO=$PANIC_COOL_TO
-PANIC_COOL_TIMEOUT=$PANIC_COOL_TIMEOUT
-PANIC_WATCH_SEC=$PANIC_WATCH_SEC
-PANIC_WATCH_TRIP=$PANIC_WATCH_TRIP
-PANIC_REPRIEVES=$PANIC_REPRIEVES
+PANIC_RECOVER=$PANIC_RECOVER
+PANIC_TIMEOUT=$PANIC_TIMEOUT
+PANIC_ACTION=$PANIC_ACTION
 ALARM=$ALARM
 ALARM_DELAY=$ALARM_DELAY
 ALARM_REPEATS=$ALARM_REPEATS
