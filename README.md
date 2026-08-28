@@ -420,10 +420,22 @@ FanCtrlOvrd — Controls the speed of the fan.
   Disabled - The system run time sets the fan speed to optimal.
 ```
 
-An always-full-speed switch, not a curve. Installing `cctk` on a modern
-distribution is its own adventure: the Dell package is built for Ubuntu 18.04
-and needs OpenSSL 1.1, which no longer exists in any repository. The libraries
-can be lifted out of the `core18` snap:
+An always-full-speed switch, not a curve.
+
+`cctk` is a proprietary Dell package and is not bundled here — download it
+yourself from [Dell's Command | Configure download page][dcc-downloads] (pick
+the Ubuntu build; it arrives as a `.tar.gz` holding two `.deb` files) and follow
+[Dell's install guide][dcc-install]. Order matters: `srvadmin-hapi` first,
+`command-configure` second. Dell retires older builds, and the driver id in the
+URL changes with every version, so there is no stable direct link to a specific
+build — start from the download page.
+
+[dcc-downloads]: https://www.dell.com/support/home/en-us/product-support/product/command-configure/drivers
+[dcc-install]: https://www.dell.com/support/manuals/en-us/command-configure/dcc_4.10_ig/installing-dell-command-configure-for-systems-running-on-ubuntu-desktop-1804-2004-or-2204
+
+Installing it on a modern distribution is its own adventure: the Dell package is
+built for Ubuntu 18.04 and needs OpenSSL 1.1, which no longer exists in any
+repository. The libraries can be lifted out of the `core18` snap:
 
 ```bash
 sudo snap install core18

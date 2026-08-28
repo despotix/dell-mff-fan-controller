@@ -379,8 +379,17 @@ curl -fsSL .../get.sh | sudo FANCTL_LANG=uk bash
 
 ### Встановлення cctk
 
-Пакети беруться з офіційної сторінки драйверів Dell (Dell Command |
-Configure для Linux, збірка під Ubuntu 18.04):
+`cctk` — пропрієтарний пакет Dell, у цьому репозиторії його немає й не буде.
+Качати самому зі [сторінки завантажень Dell Command | Configure][dcc-downloads]:
+обрати збірку під Ubuntu, вона приходить як `.tar.gz` із двома `.deb`
+усередині. Офіційна інструкція — [тут][dcc-install].
+
+[dcc-downloads]: https://www.dell.com/support/home/en-us/product-support/product/command-configure/drivers
+[dcc-install]: https://www.dell.com/support/manuals/en-us/command-configure/dcc_4.10_ig/installing-dell-command-configure-for-systems-running-on-ubuntu-desktop-1804-2004-or-2204
+
+Прямого стабільного посилання на конкретну збірку немає: Dell прибирає старі
+версії, а ідентифікатор драйвера в URL змінюється з кожною. Порядок
+встановлення важливий — `command-configure` залежить від `srvadmin-hapi`:
 
 ```bash
 sudo apt install ./srvadmin-hapi_9.5.0_amd64.deb \
